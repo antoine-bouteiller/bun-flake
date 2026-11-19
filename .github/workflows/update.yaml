@@ -1,0 +1,60 @@
+name: Update Bun
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: update-bun
+
+jobs:
+  update:
+    name: Update
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+
+      - name: Resolve latest Bun release
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(gh release view --repo oven-sh/bun --json tagName --jq '.tagName | ltrimstr("bun-v")')
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "released=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Pin Bun
+        if: steps.latest.outputs.released != 'true'
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: scripts/update.sh "$VERSION"
+
+      - name: Check pinned Bun runs
+        if: steps.latest.outputs.released != 'true'
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: test "$(nix run .#bun -- --version)" = "$VERSION"
+
+      - name: Commit, tag, and release
+        if: steps.latest.outputs.released != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # No diff when the pin already matches an untagged version, e.g. on the first run.
+          git diff --quiet || git commit -am "feat: bun $VERSION"
+          git tag "v$VERSION"
+          git push origin HEAD "v$VERSION"
+          gh release create "v$VERSION" --verify-tag --title "Bun $VERSION" \
+            --notes "Pins [Bun $VERSION](https://github.com/oven-sh/bun/releases/tag/bun-v$VERSION)."
